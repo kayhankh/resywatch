@@ -1,175 +1,86 @@
-# ResyWatch Bot
+# ResyWatch
 
-A Telegram bot that monitors Resy for open restaurant reservations and alerts you with direct booking links.
+Telegram bot that monitors restaurant availability across **Resy**, **OpenTable**, and **SevenRooms** and alerts you when tables open up.
 
-**You control it entirely through Telegram.** Message the bot to add/remove watches. It polls in the background and texts you the instant a table opens up. You tap the link and book manually.
+## How it works
 
-## How It Works
+1. You tell the bot which restaurants, dates, party size, and time window you want
+2. The bot polls the booking platform every 5 minutes
+3. When a matching table opens up, you get a Telegram notification with a direct booking link
 
-```
-You: /watch Don Angie, Apr 11-12, 2, 7-9pm
-Bot: ✅ Watch #1 added — Don Angie, Apr 11-12, party of 2, 7-9pm
+## Supported platforms
 
-[5 minutes later]
-Bot: 🚨 TABLE FOUND
-     🍽 Don Angie
-     📅 Friday, Apr 11
-     🕐 7:30 PM
-     👥 Party of 2
-     🔗 Book now → https://resy.com/cities/new-york-ny/don-angie?date=2025-04-11&seats=2
-```
+| Platform | Detection | Search | Availability | Booking Link |
+|----------|-----------|--------|-------------|-------------|
+| 🟠 Resy | URL + name search | Resy API | Resy `/4/find` | Direct |
+| 🔵 SevenRooms | URL + Google detect | Google fallback | Widget API | Direct |
+| 🔴 OpenTable | URL + name search | OT search API | REST + GQL | Direct |
 
-## Commands
-
-| Command | What it does |
-|---------|-------------|
-| `/watch <restaurant>, <dates>, <party size>, <time>` | Add a watch |
-| `/list` | Show active watches |
-| `/remove <#>` | Remove a watch |
-| `/search <name>` | Look up a restaurant on Resy |
-| `/pause` | Pause all monitoring |
-| `/resume` | Resume monitoring |
-| `/help` | Show usage examples |
-
-### Watch Format Examples
+## Usage
 
 ```
 /watch Don Angie, Apr 11-12, 2, 7-9pm
-/watch Carbone, any Friday in April, 2, 8-9:30pm
-/watch 4 Charles Prime Rib, May 3, 4, 6:30-8pm
-/watch Le Bernardin, May 1-15, 2, 7-9pm
-/watch Via Carota, Saturdays in May, 2, 7:30-9pm
+/watch Carbone, Fridays in April, 2, 8-9:30pm
+/watch https://www.sevenrooms.com/reservations/berenjakjks, Apr 18, 2, 7-9pm
+/watch https://www.opentable.com/r/gramercy-tavern-new-york, May 1, 4, 7-9pm
+/search Berenjak
+/list
+/remove 2
+/pause
+/resume
 ```
 
-You can also type `watch ...` without the slash.
+The bot auto-detects which platform a restaurant is on. If you search by name, it checks Resy first, then OpenTable, then tries Google to detect SevenRooms venues.
 
-## Setup (15 minutes)
+If you paste a booking URL, it extracts the venue slug and routes to the correct platform automatically.
 
-### 1. Create a Telegram Bot
+## Setup
 
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`
-3. Name it something like "ResyWatch"
-4. Copy the bot token (looks like `7123456789:AAF...`)
+### Environment variables
 
-### 2. Get Your Chat ID
+```
+TELEGRAM_BOT_TOKEN=your-bot-token
+TELEGRAM_CHAT_ID=your-chat-id
+RESY_API_KEY=ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"
+CHECK_INTERVAL_SECONDS=300
+DB_PATH=resywatch.db
+```
 
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It replies with your chat ID (a number like `123456789`)
-3. This ensures only YOU get the alerts
-
-### 3. Get a Resy API Key (Optional)
-
-The bot ships with a default public API key that works for reading availability. For better reliability, grab your own:
-
-1. Go to [resy.com](https://resy.com) and log in
-2. Open browser DevTools (F12) → Network tab
-3. Search for any restaurant, find a request to `api.resy.com`
-4. Copy the `Authorization` header value (looks like `ResyAPI api_key="..."`)
-
-### 4. Deploy to Railway (Free Tier)
-
-1. Push this repo to a **private** GitHub repository
-2. Go to [railway.com](https://railway.com) and sign in with GitHub
-3. Click **New Project** → **Deploy from GitHub Repo** → select your repo
-4. Go to **Variables** tab and add:
-
-| Variable | Value |
-|----------|-------|
-| `TELEGRAM_BOT_TOKEN` | Your bot token from step 1 |
-| `TELEGRAM_CHAT_ID` | Your chat ID from step 2 |
-| `CHECK_INTERVAL_SECONDS` | `300` (5 min, adjust as needed) |
-
-5. Railway auto-deploys. Your bot is live.
-
-### 4b. Alternative: Run Locally
+### Run locally
 
 ```bash
-cp .env.example .env
-# Edit .env with your values
-
 pip install -r requirements.txt
-cd src && python bot.py
+python bot.py
 ```
 
-### 4c. Alternative: Fly.io
+### Deploy to Railway
 
 ```bash
-# Install flyctl, then:
-fly launch --name resywatch --region ewr
-fly secrets set TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=xxx
-fly deploy
+railway up
 ```
+
+The included `Dockerfile` and `railway.toml` handle deployment. Set your env vars in the Railway dashboard.
 
 ## Architecture
 
 ```
-Telegram ←→ Bot (python-telegram-bot)
-                ├── Parser (regex-based NLP)
-                ├── Storage (SQLite)
-                └── Checker (Resy API poller)
-                     └── Alerts → Telegram
+bot.py                  — Telegram bot commands and polling loop
+checker.py              — Routes watches to platform checkers, filters by time window
+parser.py               — Natural language date/time parsing
+storage.py              — SQLite persistence with auto-migration
+restaurant_lookup.py    — Multi-platform search + Google auto-detection
+
+platforms/
+  __init__.py           — Platform registry
+  base.py               — Abstract base class
+  resy.py               — Resy API checker
+  sevenrooms.py         — SevenRooms widget API checker
+  opentable.py          — OpenTable REST/GQL checker
 ```
 
-- **Bot**: Handles your Telegram commands, runs a background job on a timer
-- **Parser**: Converts natural language like "Fridays in April" into structured date lists
-- **Storage**: SQLite file — persists watches and notification history across restarts
-- **Checker**: Hits Resy's `/4/find` endpoint for each watch, filters by your time window
-- **Alerts**: Sends you a Telegram message with restaurant, date, time, and booking link
+## Adding a new platform
 
-## Cost
-
-- **Railway free tier**: 500 hours/month (enough for always-on)
-- **Resy API**: Free (public read-only endpoint, no auth needed for availability)
-- **Telegram**: Free
-- **Total: $0/month** on free tier. If you exceed Railway free tier, it's ~$5/month.
-
-## How Resy's API Works
-
-The bot uses Resy's public `/4/find` endpoint:
-
-```
-GET https://api.resy.com/4/find
-    ?venue_id=123
-    &day=2025-04-11
-    &party_size=2
-    &lat=0
-    &long=0
-```
-
-This returns all available time slots with config tokens. No authentication is needed for reading availability. The bot only reads data. It never books anything on your behalf.
-
-## Rate Limiting
-
-Resy doesn't appear to enforce strict rate limits on the find endpoint, but the bot is conservative by default (every 5 minutes). You can adjust `CHECK_INTERVAL_SECONDS`:
-
-- `300` (5 min) — Good default, won't trigger any limits
-- `120` (2 min) — More aggressive, fine for a few watches
-- `60` (1 min) — Use sparingly, only for high-priority reservations
-
-## Adding OpenTable Support (Future)
-
-The architecture supports multiple platforms. OpenTable's availability can be checked via their public-facing widget endpoints. This is on the roadmap but Resy covers most hard-to-book NYC restaurants.
-
-## Troubleshooting
-
-**Bot doesn't respond:**
-- Check that `TELEGRAM_BOT_TOKEN` is correct
-- Make sure you messaged the bot first (it can't initiate conversations)
-
-**No results for /search:**
-- Try adding the city: `/search Don Angie NYC`
-- Some restaurants use slightly different names on Resy
-
-**Not getting alerts:**
-- Run `/list` to confirm watches are active (🟢 = active, ⏸ = paused)
-- Check that your dates haven't passed
-- Verify `TELEGRAM_CHAT_ID` is correct
-
-**Railway keeps restarting:**
-- Check logs in Railway dashboard for errors
-- Ensure all environment variables are set
-
-## License
-
-MIT. Use it to get great tables. Don't use it to hoard reservations.
+1. Create `platforms/newplatform.py` implementing `BasePlatform`
+2. Add it to the registry in `platforms/__init__.py`
+3. Add URL detection in `restaurant_lookup.py:detect_platform_from_url()`
+4. Add emoji/label in `bot.py`

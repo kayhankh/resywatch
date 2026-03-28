@@ -3,6 +3,8 @@ SQLite storage for watch persistence.
 
 Stores watches and notification history so the bot survives restarts
 without re-alerting for slots it already told you about.
+
+Supports multi-platform metadata via a platform_data JSON column.
 """
 
 import json
@@ -21,6 +23,7 @@ class Storage:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         self._init_db()
+        self._migrate()
 
     def _init_db(self):
         """Create tables if they don't exist."""
@@ -29,14 +32,16 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS watches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     restaurant_name TEXT NOT NULL,
-                    venue_id INTEGER,
+                    venue_id TEXT,
                     venue_display TEXT,
                     platform TEXT DEFAULT 'resy',
+                    platform_data TEXT DEFAULT '{}',
                     dates TEXT NOT NULL,
                     party_size INTEGER NOT NULL,
                     time_min TEXT NOT NULL,
                     time_max TEXT NOT NULL,
                     resy_url_slug TEXT DEFAULT '',
+                    location_slug TEXT DEFAULT '',
                     paused INTEGER DEFAULT 0,
                     active INTEGER DEFAULT 1,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -48,10 +53,27 @@ class Storage:
                     watch_id INTEGER NOT NULL,
                     date TEXT NOT NULL,
                     time TEXT NOT NULL,
+                    platform TEXT DEFAULT 'resy',
                     notified_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(watch_id, date, time)
                 )
             """)
+            conn.commit()
+
+    def _migrate(self):
+        """Add columns that may not exist in older databases."""
+        migrations = [
+            ("watches", "platform_data", "TEXT DEFAULT '{}'"),
+            ("watches", "location_slug", "TEXT DEFAULT ''"),
+            ("notifications", "platform", "TEXT DEFAULT 'resy'"),
+        ]
+        with self._conn() as conn:
+            for table, column, col_type in migrations:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                    logger.info(f"Migrated: added {column} to {table}")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
             conn.commit()
 
     def _conn(self) -> sqlite3.Connection:
@@ -60,25 +82,28 @@ class Storage:
     def add_watch(self, watch: dict) -> int:
         """Add a new watch. Returns the watch ID."""
         dates_json = json.dumps(watch["dates"])
+        platform_data_json = json.dumps(watch.get("platform_data", {}))
 
         with self._conn() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO watches
-                    (restaurant_name, venue_id, venue_display, platform,
-                     dates, party_size, time_min, time_max, resy_url_slug)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (restaurant_name, venue_id, venue_display, platform, platform_data,
+                     dates, party_size, time_min, time_max, resy_url_slug, location_slug)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     watch.get("restaurant_name", ""),
-                    watch.get("venue_id"),
+                    str(watch.get("venue_id", "")),
                     watch.get("venue_display", watch.get("restaurant_name", "")),
                     watch.get("platform", "resy"),
+                    platform_data_json,
                     dates_json,
                     watch["party_size"],
                     watch["time_min"],
                     watch["time_max"],
                     watch.get("resy_url_slug", ""),
+                    watch.get("location_slug", ""),
                 ),
             )
             conn.commit()
@@ -97,6 +122,14 @@ class Storage:
             watch = dict(row)
             watch["dates"] = json.loads(watch["dates"])
             watch["notified_slots"] = self._get_notified_slots(watch["id"])
+
+            # Parse platform_data JSON
+            pd_raw = watch.get("platform_data", "{}")
+            try:
+                watch["platform_data"] = json.loads(pd_raw) if pd_raw else {}
+            except (json.JSONDecodeError, TypeError):
+                watch["platform_data"] = {}
+
             watches.append(watch)
 
         return watches
@@ -119,17 +152,17 @@ class Storage:
             conn.commit()
             return watch
 
-    def mark_notified(self, watch_id: int, date: str, time_str: str):
+    def mark_notified(self, watch_id: int, date: str, time_str: str, platform: str = "resy"):
         """Record that we sent an alert for this slot."""
         with self._conn() as conn:
             try:
                 conn.execute(
-                    "INSERT OR IGNORE INTO notifications (watch_id, date, time) VALUES (?, ?, ?)",
-                    (watch_id, date, time_str),
+                    "INSERT OR IGNORE INTO notifications (watch_id, date, time, platform) VALUES (?, ?, ?, ?)",
+                    (watch_id, date, time_str, platform),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
-                pass  # Already notified
+                pass
 
     def _get_notified_slots(self, watch_id: int) -> list[str]:
         """Get list of already-notified slot keys for a watch."""
@@ -142,7 +175,6 @@ class Storage:
         return [f"{row[0]}_{row[1]}" for row in rows]
 
     def pause_watch(self, watch_id: int) -> bool:
-        """Pause a specific watch."""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE watches SET paused = 1 WHERE id = ? AND active = 1",
@@ -152,7 +184,6 @@ class Storage:
             return conn.total_changes > 0
 
     def resume_watch(self, watch_id: int) -> bool:
-        """Resume a specific watch."""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE watches SET paused = 0 WHERE id = ? AND active = 1",
